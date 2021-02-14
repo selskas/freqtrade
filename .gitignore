@@ -95,3 +95,4 @@ target/
 
 #exceptions
 !*.gitkeep
+.DS_Store
