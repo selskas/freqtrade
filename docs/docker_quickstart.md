@@ -1,5 +1,7 @@
 # Using Freqtrade with Docker
 
+This page explains how to run the bot with Docker. It is not meant to work out of the box. You'll still need to read through the documentation and understand how to properly configure it.
+
 ## Install Docker
 
 Start by downloading and installing Docker CE for your platform:
@@ -75,7 +77,7 @@ The last 2 steps in the snippet create the directory with `user_data`, as well a
 
 1. The configuration is now available as `user_data/config.json`
 2. Copy a custom strategy to the directory `user_data/strategies/`
-3. add the Strategy' class name to the `docker-compose.yml` file
+3. Add the Strategy' class name to the `docker-compose.yml` file
 
 The `SampleStrategy` is run by default.
 
@@ -89,6 +91,9 @@ Once this is done, you're ready to launch the bot in trading mode (Dry-run or Li
 ``` bash
 docker-compose up -d
 ```
+
+!!! Warning "Default configuration"
+    While the configuration generated will be mostly functional, you will still need to verify that all options correspond to what you want (like Pricing, pairlist, ...) before starting the bot.
 
 #### Monitoring the bot
 
@@ -151,8 +156,8 @@ Head over to the [Backtesting Documentation](backtesting.md) to learn more.
 
 ### Additional dependencies with docker-compose
 
-If your strategy requires dependencies not included in the default image (like [technical](https://github.com/freqtrade/technical)) - it will be necessary to build the image on your host.
-For this, please create a Dockerfile containing installation steps for the additional dependencies (have a look at [docker/Dockerfile.technical](https://github.com/freqtrade/freqtrade/blob/develop/docker/Dockerfile.technical) for an example).
+If your strategy requires dependencies not included in the default image - it will be necessary to build the image on your host.
+For this, please create a Dockerfile containing installation steps for the additional dependencies (have a look at [docker/Dockerfile.custom](https://github.com/freqtrade/freqtrade/blob/develop/docker/Dockerfile.custom) for an example).
 
 You'll then also need to modify the `docker-compose.yml` file and uncomment the build step, as well as rename the image to avoid naming collisions.
 

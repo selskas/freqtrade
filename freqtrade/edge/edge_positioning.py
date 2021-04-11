@@ -84,9 +84,8 @@ class Edge:
             self.fee = self.exchange.get_fee(symbol=expand_pairlist(
                 self.config['exchange']['pair_whitelist'], list(self.exchange.markets))[0])
 
-    def calculate(self) -> bool:
-        pairs = expand_pairlist(self.config['exchange']['pair_whitelist'],
-                                list(self.exchange.markets))
+    def calculate(self, pairs: List[str]) -> bool:
+
         heartbeat = self.edge_config.get('process_throttle_secs')
 
         if (self._last_updated > 0) and (
@@ -104,6 +103,7 @@ class Edge:
                 exchange=self.exchange,
                 timeframe=self.strategy.timeframe,
                 timerange=self._timerange,
+                data_format=self.config.get('dataformat_ohlcv', 'json'),
             )
 
         data = load_data(

@@ -23,7 +23,8 @@ from freqtrade.data.converter import ohlcv_to_dataframe, trades_dict_to_list
 from freqtrade.exceptions import (DDosProtection, ExchangeError, InsufficientFundsError,
                                   InvalidOrderException, OperationalException, RetryableOrderError,
                                   TemporaryError)
-from freqtrade.exchange.common import (API_FETCH_ORDER_RETRY_COUNT, BAD_EXCHANGES, retrier,
+from freqtrade.exchange.common import (API_FETCH_ORDER_RETRY_COUNT, BAD_EXCHANGES,
+                                       EXCHANGE_HAS_OPTIONAL, EXCHANGE_HAS_REQUIRED, retrier,
                                        retrier_async)
 from freqtrade.misc import deep_merge_dicts, safe_value_fallback2
 from freqtrade.plugins.pairlist.pairlist_helpers import expand_pairlist
@@ -147,6 +148,9 @@ class Exchange:
         """
         Destructor - clean up async stuff
         """
+        self.close()
+
+    def close(self):
         logger.debug("Exchange object destroyed, closing async loop")
         if self._api_async and inspect.iscoroutinefunction(self._api_async.close):
             asyncio.get_event_loop().run_until_complete(self._api_async.close())
@@ -308,8 +312,8 @@ class Exchange:
             self._markets = self._api.load_markets()
             self._load_async_markets()
             self._last_markets_refresh = arrow.utcnow().int_timestamp
-        except ccxt.BaseError as e:
-            logger.warning('Unable to initialize markets. Reason: %s', e)
+        except ccxt.BaseError:
+            logger.exception('Unable to initialize markets.')
 
     def reload_markets(self) -> None:
         """Reload markets both sync and async if refresh interval has passed """
@@ -528,19 +532,19 @@ class Exchange:
             return None
 
         # reserve some percent defined in config (5% default) + stoploss
-        amount_reserve_percent = 1.0 - self._config.get('amount_reserve_percent',
+        amount_reserve_percent = 1.0 + self._config.get('amount_reserve_percent',
                                                         DEFAULT_AMOUNT_RESERVE_PERCENT)
-        amount_reserve_percent += stoploss
+        amount_reserve_percent += abs(stoploss)
         # it should not be more than 50%
-        amount_reserve_percent = max(amount_reserve_percent, 0.5)
+        amount_reserve_percent = max(min(amount_reserve_percent, 1.5), 1)
 
         # The value returned should satisfy both limits: for amount (base currency) and
         # for cost (quote, stake currency), so max() is used here.
         # See also #2575 at github.
-        return max(min_stake_amounts) / amount_reserve_percent
+        return max(min_stake_amounts) * amount_reserve_percent
 
-    def dry_run_order(self, pair: str, ordertype: str, side: str, amount: float,
-                      rate: float, params: Dict = {}) -> Dict[str, Any]:
+    def create_dry_run_order(self, pair: str, ordertype: str, side: str, amount: float,
+                             rate: float, params: Dict = {}) -> Dict[str, Any]:
         order_id = f'dry_run_{side}_{datetime.now().timestamp()}'
         _amount = self.amount_to_precision(pair, amount)
         dry_order = {
@@ -614,7 +618,7 @@ class Exchange:
             rate: float, time_in_force: str) -> Dict:
 
         if self._config['dry_run']:
-            dry_order = self.dry_run_order(pair, ordertype, "buy", amount, rate)
+            dry_order = self.create_dry_run_order(pair, ordertype, "buy", amount, rate)
             return dry_order
 
         params = self._params.copy()
@@ -627,7 +631,7 @@ class Exchange:
              rate: float, time_in_force: str = 'gtc') -> Dict:
 
         if self._config['dry_run']:
-            dry_order = self.dry_run_order(pair, ordertype, "sell", amount, rate)
+            dry_order = self.create_dry_run_order(pair, ordertype, "sell", amount, rate)
             return dry_order
 
         params = self._params.copy()
@@ -658,8 +662,6 @@ class Exchange:
 
     @retrier
     def get_balance(self, currency: str) -> float:
-        if self._config['dry_run']:
-            return self._config['dry_run_wallet']
 
         # ccxt exception is already handled by get_balances
         balances = self.get_balances()
@@ -671,8 +673,6 @@ class Exchange:
 
     @retrier
     def get_balances(self) -> dict:
-        if self._config['dry_run']:
-            return {}
 
         try:
             balances = self._api.fetch_balance()
@@ -803,7 +803,7 @@ class Exchange:
 
         # Gather coroutines to run
         for pair, timeframe in set(pair_list):
-            if (not ((pair, timeframe) in self._klines)
+            if (((pair, timeframe) not in self._klines)
                     or self._now_is_time_to_refresh(pair, timeframe)):
                 input_coroutines.append(self._async_get_candle_history(pair, timeframe,
                                                                        since_ms=since_ms))
@@ -955,7 +955,7 @@ class Exchange:
         while True:
             t = await self._async_fetch_trades(pair,
                                                params={self._trades_pagination_arg: from_id})
-            if len(t):
+            if t:
                 # Skip last id since its the key for the next call
                 trades.extend(t[:-1])
                 if from_id == t[-1][1] or t[-1][0] > until:
@@ -987,7 +987,7 @@ class Exchange:
         # DEFAULT_TRADES_COLUMNS: 1 -> id
         while True:
             t = await self._async_fetch_trades(pair, since=since)
-            if len(t):
+            if t:
                 since = t[-1][0]
                 trades.extend(t)
                 # Reached the end of the defined-download period
@@ -1053,7 +1053,8 @@ class Exchange:
         :param order: Order dict as returned from fetch_order()
         :return: True if order has been cancelled without being filled, False otherwise.
         """
-        return order.get('status') in ('closed', 'canceled') and order.get('filled') == 0.0
+        return (order.get('status') in ('closed', 'canceled', 'cancelled')
+                and order.get('filled') == 0.0)
 
     @retrier
     def cancel_order(self, order_id: str, pair: str) -> Dict:
@@ -1228,6 +1229,8 @@ class Exchange:
     def get_fee(self, symbol: str, type: str = '', side: str = '', amount: float = 1,
                 price: float = 1, taker_or_maker: str = 'maker') -> float:
         try:
+            if self._config['dry_run'] and self._config.get('fee', None) is not None:
+                return self._config['fee']
             # validate that markets are loaded before trying to get fee
             if self._api.markets is None or len(self._api.markets) == 0:
                 self._api.load_markets()
@@ -1300,14 +1303,6 @@ class Exchange:
                 self.calculate_fee_rate(order))
 
 
-def is_exchange_bad(exchange_name: str) -> bool:
-    return exchange_name in BAD_EXCHANGES
-
-
-def get_exchange_bad_reason(exchange_name: str) -> str:
-    return BAD_EXCHANGES.get(exchange_name, "")
-
-
 def is_exchange_known_ccxt(exchange_name: str, ccxt_module: CcxtModuleType = None) -> bool:
     return exchange_name in ccxt_exchanges(ccxt_module)
 
@@ -1328,7 +1323,36 @@ def available_exchanges(ccxt_module: CcxtModuleType = None) -> List[str]:
     Return exchanges available to the bot, i.e. non-bad exchanges in the ccxt list
     """
     exchanges = ccxt_exchanges(ccxt_module)
-    return [x for x in exchanges if not is_exchange_bad(x)]
+    return [x for x in exchanges if validate_exchange(x)[0]]
+
+
+def validate_exchange(exchange: str) -> Tuple[bool, str]:
+    ex_mod = getattr(ccxt, exchange.lower())()
+    if not ex_mod or not ex_mod.has:
+        return False, ''
+    missing = [k for k in EXCHANGE_HAS_REQUIRED if ex_mod.has.get(k) is not True]
+    if missing:
+        return False, f"missing: {', '.join(missing)}"
+
+    missing_opt = [k for k in EXCHANGE_HAS_OPTIONAL if not ex_mod.has.get(k)]
+
+    if exchange.lower() in BAD_EXCHANGES:
+        return False, BAD_EXCHANGES.get(exchange.lower(), '')
+    if missing_opt:
+        return True, f"missing opt: {', '.join(missing_opt)}"
+
+    return True, ''
+
+
+def validate_exchanges(all_exchanges: bool) -> List[Tuple[str, bool, str]]:
+    """
+    :return: List of tuples with exchangename, valid, reason.
+    """
+    exchanges = ccxt_exchanges() if all_exchanges else available_exchanges()
+    exchanges_valid = [
+        (e, *validate_exchange(e)) for e in exchanges
+    ]
+    return exchanges_valid
 
 
 def timeframe_to_seconds(timeframe: str) -> int:
