@@ -96,3 +96,5 @@ target/
 #exceptions
 !*.gitkeep
 .DS_Store
+.ftpconfig
+amazing_config.json
